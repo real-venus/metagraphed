@@ -41,6 +41,14 @@ export const ALERT_TRIGGERS_INTERNAL_TOKEN_HEADER =
 // pathological body.
 export const ALERT_TRIGGER_MAX_BODY_BYTES = 8192;
 
+// Advertised policy of the ALERT_TRIGGER_CREATE_RATE_LIMITER binding
+// (wrangler.data.jsonc: simple { limit: 10, period: 60 }). Kept here, next to
+// the binding it describes, so the create route's 429 can emit an honest
+// retry-after / x-ratelimit-* family instead of a bare status -- and so the
+// two stay in sync if the wrangler policy is retuned (#5475). Shape mirrors
+// entities.mjs's BALANCE_RATE_LIMIT.
+export const ALERT_TRIGGER_CREATE_RATE_LIMIT = { limit: 10, windowSeconds: 60 };
+
 export const ALERT_CHANNELS = new Set([
   "webhook",
   "email",

@@ -410,6 +410,7 @@ function latestObservedIso(rows, field = "last_observed") {
 }
 import { timingSafeEqual } from "../src/webhooks.mjs";
 import {
+  ALERT_TRIGGER_CREATE_RATE_LIMIT,
   ALERT_TRIGGER_CREATE_TOKEN_HEADER,
   ALERT_TRIGGER_MAX_BODY_BYTES,
   ALERT_TRIGGER_OWNER_TOKEN_HEADER,
@@ -497,11 +498,29 @@ const NEURONS_SYNC_BOOLEAN_COLUMNS = new Set([
 // Separate from the read path's json() -- a write ack must never carry the
 // GET routes' `cache-control: public, max-age=10` (or the CORS wildcard,
 // meaningless for a service-binding-only route).
-function writeJson(data, status = 200) {
+function writeJson(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...extraHeaders,
+    },
   });
+}
+
+// Standard rate-limit header family for a 429 from the alert-trigger create
+// limiter (#5475). Advertises the real ALERT_TRIGGER_CREATE_RATE_LIMIT policy
+// so a throttled client gets an actionable backoff signal (retry-after) and
+// the api.mjs proxy has headers to forward -- mirrors the shape the live
+// /accounts/{ss58}/balance and /subnets/{netuid}/recycled 429s already emit.
+function alertTriggerCreateRateLimitHeaders() {
+  const { limit, windowSeconds } = ALERT_TRIGGER_CREATE_RATE_LIMIT;
+  return {
+    "retry-after": String(windowSeconds),
+    "x-ratelimit-limit": String(limit),
+    "x-ratelimit-policy": `${limit};w=${windowSeconds}`,
+    "x-ratelimit-remaining": "0",
+  };
 }
 
 function utf8Bytes(value) {
@@ -2964,6 +2983,7 @@ async function handleAlertTriggerCreate(request, env) {
       return writeJson(
         { error: "too many alert trigger creation requests; slow down" },
         429,
+        alertTriggerCreateRateLimitHeaders(),
       );
     }
   }

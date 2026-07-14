@@ -748,6 +748,56 @@ async function handleChainEventsProxy(request, env, url) {
 // auth (creation token / per-trigger owner token) and routing itself --
 // mirrors handleChainEventsProxy's envelope-translation shape above, just
 // generalized past GET.
+// Distinct, documented error code per upstream failure mode (#5475). The proxy
+// previously collapsed EVERY non-2xx into a single alert_trigger_request_failed,
+// so a 400 (malformed body), 401 (bad create/owner token), 404 (no such
+// trigger), 413 (body too large), 429 (rate-limited) and 5xx (upstream down)
+// were indistinguishable to a client reading `error.code`. Map each to its own
+// code, mirroring the per-condition taxonomy the live /accounts/{ss58}/balance
+// and /subnets/{netuid}/recycled routes already expose. Unmapped 4xx keep the
+// original generic code so the change is additive, never a silent reclass.
+function alertTriggerErrorCode(status) {
+  switch (status) {
+    case 400:
+      return "alert_trigger_invalid_request";
+    case 401:
+      return "alert_trigger_unauthorized";
+    case 404:
+      return "alert_trigger_not_found";
+    case 413:
+      return "alert_trigger_payload_too_large";
+    case 429:
+      return "alert_trigger_rate_limited";
+    default:
+      return status >= 500
+        ? "alert_triggers_unavailable"
+        : "alert_trigger_request_failed";
+  }
+}
+
+// Rate-limit / backoff headers to relay from the upstream error response onto
+// the proxied error (#5475). The DATA_API tier's 429 carries the standard
+// retry-after / x-ratelimit-* family (see data-api.mjs's
+// alertTriggerCreateRateLimitHeaders); a bare status without them leaves a
+// throttled client with no backoff signal. Whitelisted, not a blind copy, so
+// hop-by-hop / content headers (content-length, set-cookie, …) never leak
+// through the envelope translation.
+const ALERT_TRIGGER_FORWARDED_HEADERS = [
+  "retry-after",
+  "x-ratelimit-limit",
+  "x-ratelimit-policy",
+  "x-ratelimit-remaining",
+  "x-ratelimit-reset",
+];
+function forwardedAlertTriggerHeaders(upstream) {
+  const out = {};
+  for (const name of ALERT_TRIGGER_FORWARDED_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value !== null) out[name] = value;
+  }
+  return out;
+}
+
 async function handleAlertTriggersProxy(request, env) {
   if (!env.DATA_API) {
     return errorResponse(
@@ -769,11 +819,13 @@ async function handleAlertTriggersProxy(request, env) {
   }
   if (!upstream.ok) {
     return errorResponse(
-      "alert_trigger_request_failed",
+      alertTriggerErrorCode(upstream.status),
       typeof body?.error === "string"
         ? body.error
         : "The alert triggers tier returned an error.",
       upstream.status,
+      {},
+      forwardedAlertTriggerHeaders(upstream),
     );
   }
   return dataResponse(env, body, upstream.status);

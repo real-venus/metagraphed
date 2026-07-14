@@ -149,7 +149,118 @@ test("relays a non-2xx upstream status with the upstream's error message", async
     {},
   );
   assert.equal(res.status, 401);
-  assert.equal((await res.json()).error.message, "provide a valid token");
+  const relayed = await res.json();
+  assert.equal(relayed.error.message, "provide a valid token");
+  // #5475: a 401 is now a distinct code, not the collapsed generic one.
+  assert.equal(relayed.error.code, "alert_trigger_unauthorized");
+});
+
+// #5475: each upstream failure mode maps to its own documented error code
+// instead of the single collapsed alert_trigger_request_failed.
+for (const [status, code] of [
+  [400, "alert_trigger_invalid_request"],
+  [401, "alert_trigger_unauthorized"],
+  [404, "alert_trigger_not_found"],
+  [413, "alert_trigger_payload_too_large"],
+  [429, "alert_trigger_rate_limited"],
+  [502, "alert_triggers_unavailable"],
+  [503, "alert_triggers_unavailable"],
+]) {
+  test(`maps upstream ${status} to error code ${code}`, async () => {
+    const res = await handleRequest(
+      req("/api/v1/alerts/triggers", { method: "POST", body: {} }),
+      {
+        DATA_API: {
+          fetch() {
+            return new Response(JSON.stringify({ error: "upstream said no" }), {
+              status,
+            });
+          },
+        },
+      },
+      {},
+    );
+    assert.equal(res.status, status);
+    assert.equal((await res.json()).error.code, code);
+  });
+}
+
+// #5475: an unmapped 4xx keeps the original generic code -- the reclass is
+// additive, never a silent catch-all reassignment.
+test("keeps the generic code for an unmapped 4xx status", async () => {
+  const res = await handleRequest(
+    req("/api/v1/alerts/triggers", { method: "POST", body: {} }),
+    {
+      DATA_API: {
+        fetch() {
+          return new Response(JSON.stringify({ error: "teapot" }), {
+            status: 418,
+          });
+        },
+      },
+    },
+    {},
+  );
+  assert.equal(res.status, 418);
+  assert.equal((await res.json()).error.code, "alert_trigger_request_failed");
+});
+
+// #5475: the upstream's rate-limit header family is forwarded onto the proxied
+// 429 so a throttled client sees the real backoff signal.
+test("forwards the upstream rate-limit headers on a 429", async () => {
+  const res = await handleRequest(
+    req("/api/v1/alerts/triggers", {
+      method: "POST",
+      headers: { "x-alert-trigger-create-token": "shared-secret" },
+      body: { channel: "email", destination: "a@b.com", netuid: 7 },
+    }),
+    {
+      DATA_API: {
+        fetch() {
+          return new Response(
+            JSON.stringify({ error: "too many alert trigger creation requests" }),
+            {
+              status: 429,
+              headers: {
+                "retry-after": "60",
+                "x-ratelimit-limit": "10",
+                "x-ratelimit-policy": "10;w=60",
+                "x-ratelimit-remaining": "0",
+              },
+            },
+          );
+        },
+      },
+    },
+    {},
+  );
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get("retry-after"), "60");
+  assert.equal(res.headers.get("x-ratelimit-limit"), "10");
+  assert.equal(res.headers.get("x-ratelimit-policy"), "10;w=60");
+  assert.equal(res.headers.get("x-ratelimit-remaining"), "0");
+});
+
+// #5475: header forwarding is a whitelisted copy -- absent upstream headers
+// simply don't appear, and non-listed headers never leak through.
+test("omits rate-limit headers when the upstream error carries none", async () => {
+  const res = await handleRequest(
+    req("/api/v1/alerts/triggers", { method: "POST", body: {} }),
+    {
+      DATA_API: {
+        fetch() {
+          return new Response(JSON.stringify({ error: "bad request" }), {
+            status: 400,
+            headers: { "set-cookie": "leak=1" },
+          });
+        },
+      },
+    },
+    {},
+  );
+  assert.equal(res.status, 400);
+  assert.equal(res.headers.get("retry-after"), null);
+  assert.equal(res.headers.get("set-cookie"), null);
 });
 
 test("relays a non-2xx upstream status with a generic message when the body has no error string", async () => {
