@@ -3220,6 +3220,160 @@ describe("graphql — account_prometheus (#5703, Postgres-tier { data, generated
   });
 });
 
+describe("graphql — account_counterparties (#5893, Postgres-tier bare buildCounterparties shape + empty-card fallback)", () => {
+  const SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+  const OTHER = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty";
+
+  function query(argsClause) {
+    return `{ account_counterparties${argsClause} {
+      schema_version ss58 counterparty_count transfers_scanned scan_capped total_sent_tao total_received_tao
+      counterparties { address sent_tao received_tao net_tao transfer_count last_block }
+    } }`;
+  }
+
+  test("cold store: no Postgres flag returns a schema-stable empty card, never null", async () => {
+    const { status, body } = await gql(query(`(ss58: "${SS58}")`));
+    assert.equal(status, 200);
+    assert.equal(body.errors, undefined);
+    assert.deepEqual(body.data.account_counterparties, {
+      schema_version: 1,
+      ss58: SS58,
+      counterparty_count: 0,
+      transfers_scanned: 0,
+      scan_capped: false,
+      total_sent_tao: 0,
+      total_received_tao: 0,
+      counterparties: [],
+    });
+  });
+
+  test("resolves the Postgres-tier bare counterparties leaderboard", async () => {
+    const env = {
+      METAGRAPH_ACCOUNT_EVENTS_SOURCE: "postgres",
+      DATA_API: {
+        fetch: async () =>
+          Response.json({
+            schema_version: 1,
+            ss58: SS58,
+            counterparty_count: 1,
+            transfers_scanned: 3,
+            scan_capped: false,
+            total_sent_tao: 12.5,
+            total_received_tao: 4,
+            counterparties: [
+              {
+                address: OTHER,
+                sent_tao: 12.5,
+                received_tao: 4,
+                net_tao: -8.5,
+                transfer_count: 3,
+                last_block: 4210000,
+              },
+            ],
+          }),
+      },
+    };
+    const { status, body } = await gql(query(`(ss58: "${SS58}")`), env);
+    assert.equal(status, 200);
+    const d = body.data.account_counterparties;
+    assert.equal(d.counterparty_count, 1);
+    assert.equal(d.transfers_scanned, 3);
+    assert.equal(d.total_sent_tao, 12.5);
+    const c = d.counterparties[0];
+    assert.equal(c.address, OTHER);
+    assert.equal(c.net_tao, -8.5);
+    assert.equal(c.transfer_count, 3);
+    assert.equal(c.last_block, 4210000);
+  });
+
+  test("a partial Postgres-tier body degrades every missing field to its schema-stable default", async () => {
+    const env = {
+      METAGRAPH_ACCOUNT_EVENTS_SOURCE: "postgres",
+      DATA_API: {
+        // Only address is present on the row and the envelope omits the
+        // summary fields -- the resolver must fill each with its default
+        // rather than surface undefined.
+        fetch: async () =>
+          Response.json({ counterparties: [{ address: OTHER }] }),
+      },
+    };
+    const { status, body } = await gql(query(`(ss58: "${SS58}")`), env);
+    assert.equal(status, 200);
+    const d = body.data.account_counterparties;
+    assert.equal(d.schema_version, 1);
+    assert.equal(d.ss58, SS58);
+    assert.equal(d.counterparty_count, 0);
+    assert.equal(d.transfers_scanned, 0);
+    assert.equal(d.scan_capped, false);
+    assert.equal(d.total_sent_tao, null);
+    assert.equal(d.total_received_tao, null);
+    const c = d.counterparties[0];
+    assert.equal(c.address, OTHER);
+    assert.equal(c.sent_tao, null);
+    assert.equal(c.received_tao, null);
+    assert.equal(c.net_tao, null);
+    assert.equal(c.transfer_count, 0);
+    assert.equal(c.last_block, null);
+  });
+
+  test("counterparty + limit args are forwarded as query params to the /counterparties path", async () => {
+    let capturedUrl;
+    const env = {
+      METAGRAPH_ACCOUNT_EVENTS_SOURCE: "postgres",
+      DATA_API: {
+        fetch: async (req) => {
+          capturedUrl = new URL(req.url);
+          return Response.json({
+            schema_version: 1,
+            ss58: SS58,
+            counterparty_count: 0,
+            transfers_scanned: 0,
+            scan_capped: false,
+            total_sent_tao: 0,
+            total_received_tao: 0,
+            counterparties: [],
+          });
+        },
+      },
+    };
+    await gql(query(`(ss58: "${SS58}", counterparty: "${OTHER}", limit: 5)`), env);
+    assert.equal(
+      capturedUrl.pathname,
+      `/api/v1/accounts/${SS58}/counterparties`,
+    );
+    assert.equal(capturedUrl.searchParams.get("counterparty"), OTHER);
+    assert.equal(capturedUrl.searchParams.get("limit"), "5");
+  });
+
+  test("rejects a malformed ss58 with BAD_USER_INPUT", async () => {
+    const { body } = await gql(query(`(ss58: "not-an-address")`));
+    assert.equal(body.errors[0].extensions.code, "BAD_USER_INPUT");
+  });
+
+  test("rejects a malformed counterparty with BAD_USER_INPUT", async () => {
+    const { body } = await gql(
+      query(`(ss58: "${SS58}", counterparty: "not-an-address")`),
+    );
+    assert.equal(body.errors[0].extensions.code, "BAD_USER_INPUT");
+  });
+
+  test("rejects a self-counterparty with BAD_USER_INPUT", async () => {
+    const { body } = await gql(
+      query(`(ss58: "${SS58}", counterparty: "${SS58}")`),
+    );
+    assert.equal(body.errors[0].extensions.code, "BAD_USER_INPUT");
+  });
+
+  test("rejects a non-positive limit with BAD_USER_INPUT", async () => {
+    const { body } = await gql(query(`(ss58: "${SS58}", limit: 0)`));
+    assert.equal(body.errors[0].extensions.code, "BAD_USER_INPUT");
+  });
+
+  test("account_counterparties is weighted as a fan-out field", () => {
+    assert.equal(FIELD_COMPLEXITY.account_counterparties, 5);
+  });
+});
+
 describe("graphql — account_stake_flow (#5706, Postgres-tier { data, generatedAt } + zeroed-card fallback)", () => {
   const SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
 

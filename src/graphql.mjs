@@ -110,6 +110,7 @@ import {
   buildAccountsList,
 } from "./accounts-list.mjs";
 import { buildAccountSummary } from "./account-events.mjs";
+import { buildCounterparties } from "./counterparties.mjs";
 import {
   DEFAULT_PROMETHEUS_WINDOW,
   PROMETHEUS_WINDOWS,
@@ -308,6 +309,8 @@ export const SDL = `
     account_prometheus(ss58: String!, window: String): AccountPrometheus!
     "One account's per-subnet registration footprint over a 7d/30d/90d window (default 30d): NeuronRegistered count and first/last timestamps per subnet, an HHI concentration of where its registration activity is focused, and the dominant subnet; an address with no registrations in the window resolves to a schema-stable zeroed card, never null. Mirrors GET /api/v1/accounts/{ss58}/registrations."
     account_registrations(ss58: String!, window: String): AccountRegistrations!
+    "One account's transfer-counterparty leaderboard by ss58 -- every address it sent TAO to or received TAO from, with directional sent/received/net totals and transfer counts, ranked by volume. Pass counterparty to drill into a single relationship (1-row leaderboard). An address with no transfers resolves to a schema-stable empty card, never null. Mirrors GET /api/v1/accounts/{ss58}/counterparties."
+    account_counterparties(ss58: String!, counterparty: String, limit: Int): AccountCounterparties!
     "One account's per-subnet deregistration footprint over a 7d/30d/90d window (default 30d): NeuronDeregistered count and first/last timestamps per subnet, an HHI concentration of where its deregistration activity is focused, and the dominant subnet; an address with no deregistrations in the window resolves to a schema-stable zeroed card, never null. Mirrors GET /api/v1/accounts/{ss58}/deregistrations."
     account_deregistrations(ss58: String!, window: String): AccountDeregistrations!
     "One account's StakeAdded/StakeRemoved flow per subnet over a 7d/30d/90d window (default 30d) -- net + gross flow, a direction label (accumulating/exiting/churning/idle), and an HHI concentration of where its flow is focused. direction narrows to inflow (in) or outflow (out) only; all (default) reports both sides. An address with no flow in the window resolves to a schema-stable zeroed card, never null. Mirrors GET /api/v1/accounts/{ss58}/stake-flow."
@@ -1654,6 +1657,27 @@ export const SDL = `
     subnets: [AccountRegistrationSubnet!]!
   }
 
+  "One counterparty in an account's transfer graph -- the other address, with directional TAO totals over the scanned transfer window."
+  type Counterparty {
+    address: String!
+    sent_tao: Float
+    received_tao: Float
+    net_tao: Float
+    transfer_count: Int!
+    last_block: Int
+  }
+
+  type AccountCounterparties {
+    schema_version: Int!
+    ss58: String!
+    counterparty_count: Int!
+    transfers_scanned: Int!
+    scan_capped: Boolean!
+    total_sent_tao: Float
+    total_received_tao: Float
+    counterparties: [Counterparty!]!
+  }
+
   "One subnet's slice of an account's deregistration footprint over the window."
   type AccountDeregistrationSubnet {
     netuid: Int!
@@ -2030,6 +2054,7 @@ export const FIELD_COMPLEXITY = {
   validator_history: RELATIONSHIP_FIELD_COMPLEXITY,
   accounts: RELATIONSHIP_FIELD_COMPLEXITY,
   account: RELATIONSHIP_FIELD_COMPLEXITY,
+  account_counterparties: RELATIONSHIP_FIELD_COMPLEXITY,
   account_registrations: RELATIONSHIP_FIELD_COMPLEXITY,
   account_deregistrations: RELATIONSHIP_FIELD_COMPLEXITY,
   account_serving: RELATIONSHIP_FIELD_COMPLEXITY,
@@ -3826,6 +3851,70 @@ const rootValue = {
         registrations: s.registrations,
         first_registered_at: s.first_registered_at ?? null,
         last_registered_at: s.last_registered_at ?? null,
+      })),
+    };
+  },
+
+  async account_counterparties({ ss58, counterparty, limit }, context) {
+    // Same SS58 + counterparty validation handleAccountCounterparties uses: a
+    // malformed ss58/counterparty, a self-counterparty, or a non-positive limit
+    // is a GraphQL BAD_USER_INPUT error, not a silently coerced card.
+    if (!SS58_ADDRESS_PATTERN.test(ss58)) {
+      throw new GraphQLError("ss58 must be a valid SS58 address.", {
+        extensions: { code: "BAD_USER_INPUT" },
+      });
+    }
+    if (counterparty != null) {
+      if (!SS58_ADDRESS_PATTERN.test(counterparty)) {
+        throw new GraphQLError(
+          "counterparty must be a valid SS58 account address.",
+          { extensions: { code: "BAD_USER_INPUT" } },
+        );
+      }
+      if (counterparty === ss58) {
+        throw new GraphQLError("counterparty must differ from ss58.", {
+          extensions: { code: "BAD_USER_INPUT" },
+        });
+      }
+    }
+    if (limit != null && (!Number.isInteger(limit) || limit < 1)) {
+      throw new GraphQLError("limit must be a positive integer.", {
+        extensions: { code: "BAD_USER_INPUT" },
+      });
+    }
+    const params = new URLSearchParams();
+    if (counterparty != null) params.set("counterparty", counterparty);
+    if (limit != null) params.set("limit", String(limit));
+    // Same DATA_API account_events tier the REST route hits, which returns the
+    // bare buildCounterparties shape (not a {data} envelope); the tier owns the
+    // Transfer scan + ranking, so nothing is duplicated here. A cold tier falls
+    // back to an empty leaderboard, never null and never a GraphQL error.
+    const data =
+      (await tryPostgresTier(
+        context.env,
+        postgresTierRequest(
+          context,
+          `/api/v1/accounts/${encodeURIComponent(ss58)}/counterparties`,
+          params,
+        ),
+        "METAGRAPH_ACCOUNT_EVENTS_SOURCE",
+      )) ??
+      buildCounterparties([], ss58, limit != null ? { limit } : {});
+    return {
+      schema_version: data.schema_version ?? 1,
+      ss58: data.ss58 ?? ss58,
+      counterparty_count: data.counterparty_count ?? 0,
+      transfers_scanned: data.transfers_scanned ?? 0,
+      scan_capped: data.scan_capped ?? false,
+      total_sent_tao: data.total_sent_tao ?? null,
+      total_received_tao: data.total_received_tao ?? null,
+      counterparties: (data.counterparties ?? []).map((c) => ({
+        address: c.address,
+        sent_tao: c.sent_tao ?? null,
+        received_tao: c.received_tao ?? null,
+        net_tao: c.net_tao ?? null,
+        transfer_count: c.transfer_count ?? 0,
+        last_block: c.last_block ?? null,
       })),
     };
   },
