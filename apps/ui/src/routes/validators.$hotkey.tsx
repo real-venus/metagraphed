@@ -14,6 +14,7 @@ import { PageHero, ShareButton, SectionAnchor, CopyableCode, StatTile } from "@j
 import { ValidatorHistoryChart } from "@/components/metagraphed/validator-history-chart";
 import { ValidatorApyPanel } from "@/components/metagraphed/validator-apy-panel";
 import { ValidatorIdentityChip } from "@/components/metagraphed/validator-identity-chip";
+import { AccountAddress } from "@/components/metagraphed/account-address";
 import { WatchValidatorAlert } from "@/components/metagraphed/watch-validator-alert";
 import { StakeUnstakeModal } from "@/components/metagraphed/stake-unstake-modal";
 import { TakeManagementModal } from "@/components/metagraphed/take-management-modal";
@@ -307,8 +308,32 @@ function ValidatorDetail({ hotkey }: { hotkey: string }) {
               Cross-subnet performance, nominators, and staking history for one Bittensor validator
               hotkey.
             </span>
-            <span className="inline-flex max-w-full min-w-0 rounded-2xl border border-border/80 bg-card/80 px-3 py-2 mg-card-glow">
-              <CopyableCode value={hotkey} truncate={false} className="max-w-full" />
+            {/* Hotkey + coldkey as one labelled identity pair (#6427). A prior
+                take dropped a bare coldkey field beside the hotkey box and read
+                as bolted-on; giving BOTH keys the same bordered box + KeyRow
+                label (matching neuron-detail-card's Hotkey/Coldkey rows) makes
+                the coldkey a deliberate sibling, not an afterthought. The hotkey
+                is this page's subject so it stays a plain CopyableCode; the
+                coldkey links out to its account via AccountAddress. */}
+            <span className="flex flex-col gap-2">
+              <span className="inline-flex max-w-full min-w-0 items-center gap-2.5 rounded-2xl border border-border/80 bg-card/80 px-3 py-2 mg-card-glow">
+                <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-ink-muted">
+                  Hotkey
+                </span>
+                <CopyableCode value={hotkey} truncate={false} className="max-w-full" />
+              </span>
+              {detail.coldkey ? (
+                <span className="inline-flex max-w-full min-w-0 items-center gap-2.5 rounded-2xl border border-border/80 bg-card/80 px-3 py-2 mg-card-glow">
+                  <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-ink-muted">
+                    Coldkey
+                  </span>
+                  <AccountAddress
+                    ss58={detail.coldkey}
+                    truncate={false}
+                    fallback={<span className="text-ink-muted">{detail.coldkey}</span>}
+                  />
+                </span>
+              ) : null}
             </span>
           </span>
         }
