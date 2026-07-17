@@ -86,6 +86,10 @@ function LeaderboardsPage() {
               label="Deregistrations CSV"
               bare
             />
+            {/* #6577: the emissions board reads economicsQuery() -> /api/v1/economics,
+                a window-independent snapshot (no `window` param, unlike the two
+                boards above), which serves ?format=csv like the sibling routes. */}
+            <DownloadCsvButton url={buildUrl("/api/v1/economics", {})} label="Emissions CSV" bare />
             <ShareButton bare />
           </ActionBar>
         }
