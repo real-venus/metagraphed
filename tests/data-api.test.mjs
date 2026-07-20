@@ -2160,6 +2160,31 @@ test("GET /api/v1/validators degrades realized_return_* to null when the neuron_
   expect(v.realized_return_1m).toBe(null);
 });
 
+test("GET /api/v1/validators leaves realized_return_* null when the neuron_daily read yields a non-array result (#7228)", async () => {
+  mockRows.current = [
+    {
+      netuid: 7,
+      uid: 3,
+      hotkey: "5Hot",
+      coldkey: "5Cold",
+      validator_trust: "0.8",
+      emission_tao: "1.23",
+      stake_tao: "456.7",
+      block_number: "5000000",
+      captured_at: "1780000000000",
+    },
+  ];
+  // A non-array read result (defensive) coerces to an empty map in
+  // realizedStakeByHotkey rather than throwing, so every window resolves null.
+  validatorRealizedStakeRows.current = null;
+  const res = await req("/api/v1/validators");
+  expect(res.status).toBe(200);
+  const v = (await res.json()).validators[0];
+  expect(v.realized_return_1d).toBe(null);
+  expect(v.realized_return_1w).toBe(null);
+  expect(v.realized_return_1m).toBe(null);
+});
+
 test("GET /api/v1/validators/:hotkey joins nominator_count from validator_nominator_counts (#2549)", async () => {
   mockQueue.current = [
     [], // sql.begin's leading `SET statement_timeout`
