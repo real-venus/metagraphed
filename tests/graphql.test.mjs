@@ -1714,6 +1714,51 @@ describe("graphql — contracts", () => {
   });
 });
 
+describe("graphql — build", () => {
+  const BUILD_BLOB = {
+    published_at: "2026-07-01T00:00:00.000Z",
+    artifact_count: 42,
+    artifact_size_bytes: 123456,
+    subnet_count: 128,
+    surface_count: 550,
+    candidate_count: 2000,
+    provider_count: 90,
+    artifact_budgets: [
+      { path: "/metagraph/subnets.json", size_bytes: 1000, budget_bytes: 2000 },
+      { path: "/metagraph/openapi.json", size_bytes: 500, budget_bytes: 1000 },
+    ],
+  };
+
+  test("serves the baked build summary artifact verbatim", async () => {
+    const env = fixtureEnv({ "/metagraph/build-summary.json": BUILD_BLOB });
+    const { status, body } = await gql(
+      "{ build { published_at artifact_count artifact_size_bytes subnet_count surface_count candidate_count provider_count artifact_budgets } }",
+      env,
+    );
+    assert.equal(status, 200);
+    const build = body.data.build;
+    assert.equal(build.published_at, "2026-07-01T00:00:00.000Z");
+    assert.equal(build.artifact_count, 42);
+    assert.equal(build.artifact_size_bytes, 123456);
+    assert.equal(build.subnet_count, 128);
+    assert.equal(build.surface_count, 550);
+    assert.equal(build.candidate_count, 2000);
+    assert.equal(build.provider_count, 90);
+    assert.equal(build.artifact_budgets.length, 2);
+    assert.equal(build.artifact_budgets[0].path, "/metagraph/subnets.json");
+  });
+
+  test("surfaces a cold/missing artifact as a GraphQL error, matching REST/MCP", async () => {
+    const { body } = await gql("{ build { artifact_count } }", emptyEnv);
+    assert.ok(body.errors?.length);
+    assert.equal(body.data.build, null);
+  });
+
+  test("FIELD_COMPLEXITY weights it like its sibling relationship fields", () => {
+    assert.equal(FIELD_COMPLEXITY.build, 5);
+  });
+});
+
 describe("graphql — health_history", () => {
   const SURFACE_ROW = {
     netuid: 7,
